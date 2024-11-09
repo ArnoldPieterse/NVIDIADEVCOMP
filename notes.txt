@@ -1,0 +1,123 @@
+# Function to load documents and create the index
+def load_documents(urls=None, file_objs=None):
+    """Load documents from files and/or URLs"""
+    try:
+        documents = []
+        
+        if urls:
+            temp_dir = tempfile.mkdtemp()
+            try:
+                for i, url in enumerate(urls):
+                    pdf_path = os.path.join(temp_dir, f"webpage_{i}.pdf")
+                    if url_to_pdf(url, pdf_path):
+                        documents.extend(SimpleDirectoryReader(input_files=[pdf_path]).load_data())
+            finally:
+                shutil.rmtree(temp_dir)
+
+        if file_objs:
+            file_paths = get_files_from_input(file_objs)
+            for file_path in file_paths:
+                documents.extend(SimpleDirectoryReader(input_files=[file_path]).load_data())
+
+        if not documents:
+            return "No documents found"
+
+        # Create FAISS vector store and index
+        dimension = 1024
+        faiss_index = faiss.IndexFlatL2(dimension)
+        vector_store = FaissVectorStore(faiss_index=faiss_index)
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        
+        global index, query_engine
+        index = VectorStoreIndex.from_documents(documents, storage_context=storage_context, show_progress=True)
+        query_engine = index.as_query_engine(similarity_top_k=20, streaming=True)
+        
+        return f"Successfully loaded {len(documents)} documents"
+        
+    except Exception as e:
+        return f"Error loading documents: {str(e)}"
+
+
+def stream_responses(message, history):
+    global index, query_engine
+    
+    try:
+        # Load documents if none exist
+        if query_engine is None:
+            print("No query engine exists, loading documents...")
+            # Get search results first
+            status, search_results, _ = load_search_results(message)
+            
+            if search_results:
+                # Pass URLs to load_documents
+                load_result = load_documents(urls=search_results)
+                if "Error" in load_result:
+                    yield history + [(message, f"Error loading content: {load_result}")]
+                    return
+            else:
+                yield history + [(message, f"Could not find search results: {status}")]
+                return
+
+        # Get RAG response
+        response = query_engine.query(message)
+        partial_response = ""
+        
+        # Stream combined response
+        for text in response.response_gen:
+            partial_response += text
+            yield history + [(message, partial_response)]
+            
+    except Exception as e:
+        yield history + [(message, f"Error processing query: {str(e)}")]
+
+
+
+# Function to load documents and create the index
+def load_documents(urls=None, file_objs=None):
+    global index, query_engine
+    try:
+        documents = []
+
+        # Handle file uploads
+        if file_objs:
+            file_paths = get_files_from_input(file_objs)
+            for file_path in file_paths:
+                documents.extend(SimpleDirectoryReader(input_files=[file_path]).load_data())
+
+        # Handle URLs
+        if urls:
+            temp_dir = tempfile.mkdtemp()
+            try:
+                for i, url in enumerate(urls):
+                    print(f"Processing URL {i+1}/{len(urls)}: {url}")
+                    pdf_path = os.path.join(temp_dir, f"webpage_{i}.pdf")
+                    if url_to_pdf(url, pdf_path):
+                        print(f"Loading PDF from {pdf_path}")
+                        documents.extend(SimpleDirectoryReader(input_files=[pdf_path]).load_data())
+            finally:
+                shutil.rmtree(temp_dir)
+
+        if not documents:
+            return "No documents found in files or URLs"
+
+        # Create Chroma client and collection
+        chroma_client = chromadb.Client()
+        chroma_collection = chroma_client.create_collection("document_store")
+        
+        # Create vector store
+        vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+        # Create index with storage context
+        index = VectorStoreIndex.from_documents(
+            documents,
+            storage_context=storage_context,
+            show_progress=True
+        )
+        query_engine = index.as_query_engine(similarity_top_k=20, streaming=True)
+        
+        return "Documents loaded successfully"
+
+    except Exception as e:
+        print(f"Error details: {type(e).__name__}: {str(e)}")
+        return f"Error loading documents: {str(e)}"
